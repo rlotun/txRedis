@@ -97,6 +97,88 @@ class InvalidData(RedisError):
     pass
 
 
+class NetBuffer(object):
+    def __init__(self):
+        self._buffer = deque()
+        self.length = 0
+
+    def __len__(self):
+        return len(self._buffer)
+
+    def append(self, data):
+        self._buffer.append(data)
+        self.length += len(data)
+
+    def popleft(self):
+        data = self._buffer.popleft()
+        self.length -= len(data)
+        return data
+
+    def reshape_chunk_by_size(self, size):
+        """ Reshape the initial chunk in buffer to be of a certain size. The
+        initial chunk will be split if it has to, or initial chunks will be
+        merged to be of the required size.
+        """
+        if len(self._buffer) == 1 and len(self._buffer[0]) < size:
+            return
+
+        prefix = []
+        remaining = size
+
+        while self._buffer and remaining > 0:
+            chunk = self._buffer.popleft()
+
+            if len(chunk) > remaining:
+                self._buffer.appendleft(chunk[remaining:])
+                chunk = chunk[:remaining]
+
+            prefix.append(chunk)
+            remaining -= len(chunk)
+
+        if prefix:
+            self._buffer.appendleft(''.join(prefix))
+
+    def reshape_chunk_by_delim(self, delim):
+        """ Reshape the initial chunk in buffer to end in a delimeter."""
+        prefix = []
+        is_multi = len(delim) > 1
+
+        while self._buffer:
+            chunk = self._buffer.popleft()
+
+            # case 1 delim is in chunk
+            if delim in chunk:
+                # split chunk and insert remainder back
+                beg, chunk = chunk.split(delim, 1)
+                prefix.extend([beg, delim])
+                if chunk:
+                    self._buffer.appendleft(chunk)
+                break
+
+            # case 2 delim (if it's multichar) is split over two adjacent chunks
+            elif is_multi and self._buffer:
+                # peekahead
+                next_chunk = self._buffer.popleft()
+                buf = ''.join([chunk, next_chunk])
+
+                if delim in buf:
+                    # found delim
+                    beg, chunk = buf.split(delim, 1)
+                    prefix.extend([beg, delim])
+                    if chunk:
+                        self._buffer.appendleft(chunk)
+                    break
+                else:
+                    self._buffer.appendleft(next_chunk)
+                    if chunk:
+                        prefix.append(chunk)
+            elif chunk:
+                prefix.append(chunk)
+
+        if prefix:
+            self._buffer.appendleft(''.join(prefix))
+
+
 class RedisBase(protocol.Protocol, policies.TimeoutMixin, object):
     """The main Redis client."""
 
@@ -111,7 +193,7 @@ class RedisBase(protocol.Protocol, policies.TimeoutMixin, object):
         self.db = db if db is not None else 0
         self.password = password
         self.errors = errors
-        self._buffer = ''
+        self._buffer = NetBuffer()
         self._bulk_length = None
         self._disconnected = False
         self._multi_bulk_length = None
@@ -123,8 +205,10 @@ class RedisBase(protocol.Protocol, policies.TimeoutMixin, object):
 
         Spec: http://redis.io/topics/protocol
         """
+        print data
         self.resetTimeout()
-        self._buffer = self._buffer + data
+        if data:
+            self._buffer.append(data)
 
         while self._buffer:
 
@@ -133,17 +217,19 @@ class RedisBase(protocol.Protocol, policies.TimeoutMixin, object):
                 # wait until there's enough data in the buffer
                 if len(self._buffer) < self._bulk_length + 2: # /r/n
                     return
-                data = self._buffer[:self._bulk_length]
-                self._buffer = self._buffer[self._bulk_length+2:] # 2 for /r/n
-                self.bulkDataReceived(data)
+                self._buffer.reshape_chunk_by_size(self._bulk_length + 2)
+                data = self._buffer.popleft()
+                self.bulkDataReceived(data[:-2])
                 continue
 
             # wait until we have a line
-            if '\r\n' not in self._buffer:
+            self._buffer.reshape_chunk_by_delim('\r\n')
+            if not self._buffer._buffer[0].endswith('\r\n'):
                 return
 
             # grab a line
-            line, self._buffer = self._buffer.split('\r\n', 1)
+            line = self._buffer.popleft()
+            line = line[:-2]  # cut out \r\n
             if len(line) == 0:
                 continue
 
