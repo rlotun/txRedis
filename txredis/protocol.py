@@ -103,7 +103,7 @@ class NetBuffer(object):
         self.length = 0
 
     def __len__(self):
-        return len(self._buffer)
+        return self.length
 
     def append(self, data):
         self._buffer.append(data)
@@ -205,7 +205,6 @@ class RedisBase(protocol.Protocol, policies.TimeoutMixin, object):
 
         Spec: http://redis.io/topics/protocol
         """
-        print data
         self.resetTimeout()
         if data:
             self._buffer.append(data)
@@ -215,7 +214,7 @@ class RedisBase(protocol.Protocol, policies.TimeoutMixin, object):
             # if we're expecting bulk data, read that many bytes
             if self._bulk_length is not None:
                 # wait until there's enough data in the buffer
-                if len(self._buffer) < self._bulk_length + 2: # /r/n
+                if self._buffer.length < self._bulk_length + 2: # /r/n
                     return
                 self._buffer.reshape_chunk_by_size(self._bulk_length + 2)
                 data = self._buffer.popleft()
